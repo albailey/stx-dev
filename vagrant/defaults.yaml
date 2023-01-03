@@ -1,0 +1,16 @@
+---
+# base_image is the starting 'box' downloaded from https://app.vagrantup.com/boxes
+# debian bullseye64 includes python 3.9
+base_image: "debian/bullseye64"
+
+# Assign a name for the development VM
+vbox_name: "stx-dev-vm"
+
+# Display the VirtualBox GUI when booting the machine
+vbox_gui: true
+
+# 32 GB memory
+vbox_memory: "32768"
+
+# 4 cpus
+vbox_cpus: "4"
