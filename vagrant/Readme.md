@@ -1,14 +1,16 @@
 Step 1: Download and install VirtualBox
+
 Step 2: Download and install vagrant
+
 Step 3: Update defaults.yaml or create a custom.yaml with the overridden values
-  Note: edit the Vagrantfile "config.vm.define" value so that you can 'vagrant up' more than one VM
+  
 Step 4: vagrant up
 
 Supported Capabilities:
  Disk:
-  - support bigger VBOX disk
-  - support relocate the DISK to be on an SSD
-  - support disk resize within the VM
+  - support bigger VBOX disk (default is 500 G)
+  - support relocate the DISK to be on an SSD (in case vbox is setting up VM disks on a non SSD drive)
+  - support disk resize within the VM (otherwise it will use the default 20G disk from the base image)
  User:
   - support ssh as the new user.
   - setup bash env (variables)
