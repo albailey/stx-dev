@@ -1,9 +1,27 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
-# A file containing all the default variables is provided
+# =========================================================
+#  Automatically setup required vagrant plugins
+#  Currently required vagrant plugins:
+#  - vagrant-disksize
+required_plugins = [ 'vagrant-disksize' ]
+
+if ARGV[0] != 'plugin'
+  plugins_to_install = required_plugins.select { |plugin| not Vagrant.has_plugin? plugin }
+  if not plugins_to_install.empty?
+    puts "Installing plugins: #{plugins_to_install.join(' ')}"
+    if system "vagrant plugin install #{plugins_to_install.join(' ')}"
+      exec "vagrant #{ARGV.join(' ')}"
+    else
+      abort "Installation of one or more plugins has failed. Aborting."
+    end
+  end
+end
+# ==========================================================
 require 'yaml'
 
+# A file containing all the default variables is provided
 VARS = YAML.load_file(File.join(File.dirname(__FILE__), 'defaults.yaml'))
 
 # A user can create a file called 'custom.yaml' and override values from 'defaults.yaml'
@@ -17,6 +35,269 @@ end
 puts "Vagrant variables:"
 puts VARS
 
+# ==========================================================
+# Setup the packages
+$package_setup = <<PACKAGE_SETUP
+  date
+  echo "Updating packages"
+
+  apt-get update
+
+  # Install some tools (curl / wget)
+  apt-get install -y curl wget apt-transport-https
+
+  # Install docker
+  apt-get install -y docker.io
+
+  # Install helm using the get-helm script
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+  # Install minikube
+  curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+  install minikube-linux-amd64 /usr/local/bin/minikube
+
+  # Install git-review
+  # Install parted (so we can allocate the full disk)
+  # python-is-python3 aliases 'python' to python3
+  apt-get install -y git-review parted python-is-python3
+
+  # Install 'repo'
+  #   The following does not work on bullseye
+  #     apt-get install -y repo
+    # Partially following the instructions from https://source.android.com/docs/setup/download#installing-repo
+  export REPO=$(mktemp /tmp/repo.XXXXXXXXX)
+  curl -o ${REPO} https://storage.googleapis.com/git-repo-downloads/repo
+  install -m 755 ${REPO} /usr/bin/repo
+
+  # Install 3rdparty components required to run 'tox' for various repos
+  # The value in (brackets) indicates the repo that likely requires that component
+  # bc (stx-tools)
+  # libffi-dev (config)
+  # libldap2-dev (config)
+  # libsasl2-dev (config)
+  # libxml2-dev (config)
+  # libxslt1-dev (config)
+  # ostree (update)
+  # python3-all-dev (config)
+  # ruby-dev (stx-puppet)
+  # ruby-rubygems (stx-puppet)
+  # tox (all)
+  apt-get install -y bc libffi-dev libldap2-dev libsasl2-dev libxml2-dev libxslt1-dev ostree python3-all-dev ruby-rubygems ruby-dev tox
+
+  # pip install some additional components that are helpful for development
+  pip3 install bindep
+PACKAGE_SETUP
+
+# ==========================================================
+# Setup the 'dev_user'
+$user_setup = <<-'USER_SETUP'
+  # Add a new user if it does not exist
+  # -m creates the default home dir
+  # -p sets the (crypted) password.  Invoking openssl to 'crypt' the password string.
+  # -s sets the shell otherwise it defaults to /bin/sh
+  id -u ${DEV_USER} &>/dev/null || useradd ${DEV_USER} -m -p $(openssl passwd -1 ${DEV_PASSWORD}) -s ${DEV_SHELL}
+  usermod -s ${DEV_SHELL} ${DEV_USER}
+  # Add the user to the docker group
+  sudo usermod -aG docker ${DEV_USER}
+  # Add the user to the sudoers file
+  echo "${DEV_USER} ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/${DEV_USER}
+  echo "Git setup"
+  su - ${DEV_USER} -c "git config --global user.name \"${USER_NAME}\""
+  su - ${DEV_USER} -c "git config --global user.email ${USER_EMAIL}"
+
+  # setup the directory for the user under /localdisk
+  MY_LOCALDISK="/localdisk/${DEV_USER}"
+  mkdir -p ${MY_LOCALDISK}
+  chown ${DEV_USER} ${MY_LOCALDISK}
+
+  # setup ssh host keys so that git hosts will not complain for ssh urls
+  # .ssh must be 700 permissions
+  # Creating it as root, because "su -" is a pain to deal with
+  mkdir -m=700 -p /home/${DEV_USER}/.ssh
+  chown ${DEV_USER}:${DEV_USER} /home/${DEV_USER}/.ssh
+
+  # Setup keys for this host
+  SSH_KEY="/home/${DEV_USER}/.ssh/id_ed25519"
+  HOSTNAME=`hostname`
+  su - ${DEV_USER} -c "ssh-keygen -q -f ${SSH_KEY} -N '' -t ed25519 -C ${DEV_USER}@${HOSTNAME}"
+
+  # Setup known hosts
+  su - ${DEV_USER} -c "ssh-keyscan -t rsa ${KNOWN_HOSTS} >> /home/${DEV_USER}/.ssh/known_hosts"
+  # some HOSTS might require an alternative port.  ie:   ssh://git@nowhere.com:7999
+  if [[ ! -z "${ALT_PORT}" ]]
+  then
+    echo "Setting up alternative known_hosts ${ALT_HOSTS} ${ALT_PORT}"
+    su - ${DEV_USER} -c "ssh-keyscan -t rsa -p ${ALT_PORT} ${ALT_HOSTS} >> /home/${DEV_USER}/.ssh/known_hosts"
+  else
+    echo "NOT Setting up alternative known_hosts"
+  fi
+
+  if [[ ! -z "${SSH_URL}" ]]
+  then
+    echo "Uploading ssh key to ${SSH_URL} by logging in with git user and password"
+    SSH_PUB_KEY=`cat ${SSH_KEY}.pub`
+    su - ${DEV_USER} -c "curl -v -u ${GIT_USER}:${GIT_PASSWORD} POST -H \"Content-Type: application/json\" -d '{\"text\": \"${SSH_PUB_KEY}\"}' ${SSH_URL}" 
+  else
+    echo "NOT uploading SSH keys to remote git server"
+  fi
+
+  # Add additional exports to .bashrc
+  # https://opendev.org/starlingx/tools/src/branch/master/import-stx.README
+  PROFILE="/home/${DEV_USER}/.profile"
+  if grep -q "PROJECT=" ${PROFILE}
+  then
+    echo "${PROFILE} already setup"
+  else
+    echo "Setting up ${PROFILE}"
+
+    # append all of these to the end of .profile
+    echo "export PROJECT=${PROJECT}" >> ${PROFILE}
+    echo "export USER_NAME=\"${USER_NAME}\"" >> ${PROFILE}
+    echo "export USER_EMAIL=${USER_EMAIL}" >> ${PROFILE}
+    echo "export MINIKUBENAME=minikube-${DEV_USER}-${PROJECT}" >> ${PROFILE}
+
+    # minikube
+    MINIKUBE_HOME="${MY_LOCALDISK}/MINIKUBE_HOME"
+    su - ${DEV_USER} -c "mkdir -p ${MINIKUBE_HOME}"
+    echo "export MINIKUBE_HOME=${MINIKUBE_HOME}" >> ${PROFILE}
+
+    # patches
+    PATCHES_DIR="${MY_LOCALDISK}/PATCHES"
+    su - ${DEV_USER} -c "mkdir -p ${PATCHES_DIR}"
+    echo "export PATCHES_DIR=${PATCHES_DIR}" >> ${PROFILE}
+
+
+    # STX_BUILD_HOME is the same as the project workspace
+    MY_WORKSPACE="${MY_LOCALDISK}/WORKSPACE/${PROJECT}"
+    su - ${DEV_USER} -c "mkdir -p ${MY_WORKSPACE}"
+    echo "export MY_WORKSPACE=${MY_WORKSPACE}" >> ${PROFILE}
+    echo "export STX_BUILD_HOME=${MY_WORKSPACE}" >> ${PROFILE}
+
+    MY_REPO_ROOT_DIR="${MY_WORKSPACE}/localdisk/designer/${DEV_USER}/${PROJECT}"
+    su - ${DEV_USER} -c "mkdir -p ${MY_REPO_ROOT_DIR}"
+    echo "export MY_REPO_ROOT_DIR=${MY_REPO_ROOT_DIR}" >> ${PROFILE}
+
+    echo "export MY_REPO=${MY_REPO_ROOT_DIR}/cgcs-root" >> ${PROFILE}
+    STX_TOOLS="${MY_REPO_ROOT_DIR}/stx-tools"
+    echo "export STX_TOOLS=${MY_REPO_ROOT_DIR}/stx-tools" >> ${PROFILE}
+    # Update the profile so that import-stx is automatically 'sourced' whenever we login
+    echo "
+if [[ -d \${STX_TOOLS} ]]; then
+  pushd \${STX_TOOLS} > /dev/null
+  source ./import-stx
+  popd > /dev/null
+fi " >>  ${PROFILE}
+
+  fi  # setting up profile
+
+USER_SETUP
+
+
+# ====================================================
+$system_setup = <<SYSTEM_SETUP
+  # Allow ssh to the machine using a password
+  sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+  systemctl restart sshd.service
+  # Ensure the entire disk is available.  Otherwise only 20G is available to "/"
+  resize2fs /dev/sda1
+  # Note: The build tools are basically hardcoded to expect things under /localdisk/<$USER>
+  mkdir -p /localdisk
+SYSTEM_SETUP
+
+# ====================================================
+# This inline script uses special syntax to prevent ruby from stripping quotes
+$repo_setup = <<-'REPO_SETUP'
+  # Note: You cannot switch users in vagrant
+  # su - <user> -c <commands> is the only way to run commands as another user
+  # Step 1)  repo init
+  MY_LOCALDISK="/localdisk/${DEV_USER}"
+  MY_WORKSPACE="${MY_LOCALDISK}/WORKSPACE/${PROJECT}"
+  MY_REPO_ROOT_DIR="${MY_WORKSPACE}/localdisk/designer/${DEV_USER}/${PROJECT}"
+  STX_TOOLS="${MY_REPO_ROOT_DIR}/stx-tools"
+
+  date
+  echo "Initializing repo"
+  su - ${DEV_USER} -c "cd ${MY_REPO_ROOT_DIR};
+                       repo init -u ${MANIFEST_URL} -m ${MANIFEST_FILE} -b ${MANIFEST_BRANCH}"
+  # Step 2)  repo sync
+  date
+  echo "Synchronizing repo.  This can take some time (approximately 8 min)"
+  su - ${DEV_USER} -c "cd ${MY_REPO_ROOT_DIR};
+                       repo sync -j $(nproc --all)"
+
+  # Step 3)  stx-init-env
+  date
+  echo "stx-init-env. This can take some time (approximately 6 min)"
+  # initialize minikube env
+  su - ${DEV_USER} -c "cd ${STX_TOOLS};
+                       source import-stx;
+                       stx config --add builder.myuname $(id -un ${DEV_USER});
+                       stx config --add builder.uid $(id -u ${DEV_USER});
+                       stx config --add project.name ${PROJECT};
+                       stx config --add project.gituser \"${USER_NAME}\";
+                       stx config --add project.gitemail ${USER_EMAIL};
+                       # stx-init-env spams stdout, so we will redirect that command to a log
+                       ./stx-init-env > ${MY_WORKSPACE}/stx-init-env.log 2>&1 ;
+
+                       # Display the last new lines of the log
+                       tail ${MY_WORKSPACE}/stx-init-env.log;
+
+                       # status should indicate success rather than 'ContainerCreating'
+                       stx control status"
+
+  # Step 3) Support minikube auto-start on reboot for this user
+  date
+  # override contents of /usr/lib/systemd/system/minikube.service
+  MINIKUBE_SERVICE="/usr/lib/systemd/system/minikube.service"
+  MINIKUBENAME="minikube-${DEV_USER}-${PROJECT}"
+  echo "
+[Unit]
+Description=minikube
+After=network-online.target containerd.service docker.service
+Wants=network-online.target docker.service
+Requires=docker.socket containerd.service docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -l -c \"minikube start -p ${MINIKUBENAME}\"
+RemainAfterExit=true
+ExecStop=/bin/bash -l -c \"minikube stop -p ${MINIKUBENAME}\"
+User=${DEV_USER}
+Group=docker
+
+[Install]
+WantedBy=multi-user.target
+" >  ${MINIKUBE_SERVICE}
+  # reload minikube systemd service
+  systemctl daemon-reload
+  systemctl enable minikube
+  systemctl start minikube
+
+  # Step 4) Run the downloader
+  date
+  echo "Waiting 60 seconds before running the downloader to ensure all containers are running"
+  sleep 60
+
+  date
+  echo "Running the downloader. This can take some time (approximately 10 min)"
+  su - ${DEV_USER} -c "cd ${STX_TOOLS};
+                       source import-stx;
+                       stx control status;
+                       echo 'Running apt-get update';
+                       stx shell -c 'sudo apt-get update';
+                       echo 'Running downloader';
+                       stx shell -c 'downloader' > ${MY_WORKSPACE}/downloader.log 2>&1;
+                       # display the last new lines of the downloader log
+                       tail ${MY_WORKSPACE}/downloader.log
+                      "
+  date
+  echo "DONE"
+
+  # populate mirrors
+  # download prebuilt artifacts
+REPO_SETUP
+
+# ===================================================================
 # All Vagrant configuration is done below. The "2" in Vagrant.configure
 # configures the configuration version (we support older styles for
 # backwards compatibility). Please don't change it unless you know what
@@ -30,6 +311,13 @@ Vagrant.configure("2") do |config|
   # boxes at https://vagrantcloud.com/search.
   config.vm.box = VARS['base_image']
 
+  # set the hostname within this VBOX
+  config.vm.hostname = VARS['hostname']
+
+  # set the vbox disk size (this uses vagrant-disksize plugin)
+  # Note: provisioning steps are needed for debian to recognize this
+  config.disksize.size = VARS['vbox_disk_size']
+
   # config.vm.define
   # Disable automatic box update checking. If you disable this, then
   # boxes will only be checked for updates when the user runs
@@ -41,6 +329,10 @@ Vagrant.configure("2") do |config|
   # accessing "localhost:8080" will access port 80 on the guest machine.
   # NOTE: This will enable public access to the opened port
   # config.vm.network "forwarded_port", guest: 80, host: 8080
+ 
+  # Replace default ssh forwarded port 2222 with whatever value we provide
+  config.vm.network "forwarded_port", guest: 22, host: VARS['sshport'], id: 'ssh'
+  config.ssh.insert_key = false
 
   # Create a forwarded port mapping which allows access to a specific port
   # within the machine from a port on the host machine and only allow access
@@ -62,34 +354,48 @@ Vagrant.configure("2") do |config|
   # argument is a set of non-required options.
   # config.vm.synced_folder "../data", "/vagrant_data"
 
+  # Disable the synched folder in vagrant
+  config.vm.synced_folder '.', '/vagrant', disabled: true
+
   # VirtualBox settings:
   config.vm.provider "virtualbox" do |vb|
      vb.name = VARS['vbox_name']
      vb.gui = VARS['vbox_gui']
      vb.memory = VARS['vbox_memory']
      vb.cpus = VARS['vbox_cpus']
+     # Override where vagrant will install the VMs
+     if !VARS['vbox_vm_location'].nil?
+       vb.customize "pre-import", ["setproperty", "machinefolder", VARS['vbox_vm_location'] ]
+     end
+     vb.customize "pre-boot", ["modifyvm", :id, "--groups", VARS['vbox_group'] ]
   end
 
-  # View the documentation for the provider you are using for more
-  # information on available options.
+  # First step of provisioning is to install the required packages
+  config.vm.provision "shell", inline: $package_setup
 
-  # Enable provisioning with a shell script. Additional provisioners such as
-  # Ansible, Chef, Docker, Puppet and Salt are also available. Please see the
-  # documentation for more information about their specific syntax and use.
-  config.vm.provision "shell", inline: <<-SHELL
-    apt-get update
+  # Make further changes to the system setup
+  config.vm.provision "shell", inline: $system_setup
 
-    # Install some tools (curl / wget)
-    apt-get install -y curl wget apt-transport-https
+  # Set up a new user
+  config.vm.provision "shell", env: {"DEV_USER" => VARS['dev_user'],
+                                     "DEV_PASSWORD" => VARS['dev_password'],
+                                     "DEV_SHELL" => VARS['dev_shell'],
+                                     "PROJECT" => VARS['PROJECT'],
+                                     "KNOWN_HOSTS" => VARS['KNOWN_HOSTS'],
+                                     "ALT_PORT" => VARS['ALT_PORT'],
+                                     "ALT_HOSTS" => VARS['ALT_HOSTS'],
+                                     "SSH_URL" => VARS['SSH_URL'],
+                                     "GIT_USER" => VARS['GIT_USER'],
+                                     "GIT_PASSWORD" => VARS['GIT_PASSWORD'],
+                                     "USER_EMAIL" => VARS['USER_EMAIL'],
+                                     "USER_NAME" => VARS['USER_NAME']}, inline: $user_setup
 
-    # Install docker
-    apt-get install -y docker.io
-
-    # Install helm using the get-helm script
-    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-    # Install minikube
-    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-    install minikube-linux-amd64 /usr/local/bin/minikube
-  SHELL
+  # Initialize the code using the repo command
+  config.vm.provision "shell", env: {"DEV_USER" => VARS['dev_user'],
+                                     "MANIFEST_URL" => VARS['MANIFEST_URL'],
+                                     "MANIFEST_FILE" => VARS['MANIFEST_FILE'],
+                                     "MANIFEST_BRANCH" => VARS['MANIFEST_BRANCH'],
+                                     "PROJECT" => VARS['PROJECT'],
+                                     "USER_EMAIL" => VARS['USER_EMAIL'],
+                                     "USER_NAME" => VARS['USER_NAME']}, inline: $repo_setup
 end

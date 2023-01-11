@@ -1,16 +1,64 @@
 ---
-# base_image is the starting 'box' downloaded from https://app.vagrantup.com/boxes
-# debian bullseye64 includes python 3.9
-base_image: "debian/bullseye64"
+  # =============== vbox settings ===============================================
+  # Before running vagrant up , update the entries with the comment: "UPDATE_ME"
+  # =============== login settings ===============================================
+  dev_user: "sysadmin"                # UPDATE_ME
+  dev_password: "sysadmin"            # UPDATE_ME
+  USER_EMAIL: "somebody@nowhere.com"  # UPDATE_ME
+  USER_NAME: "Some Body"              # UPDATE_ME
 
-# Assign a name for the development VM
-vbox_name: "stx-dev-vm"
+  # base_image is the starting 'box' downloaded from https://app.vagrantup.com/boxes
+  # debian bullseye64 includes python 3.9
+  base_image: "debian/bullseye64"
 
-# Display the VirtualBox GUI when booting the machine
-vbox_gui: true
+  # Create a VBox Group for the VM. Useful when making separate VMs for different branches
+  vbox_group: "/StarlingX Dev"
 
-# 32 GB memory
-vbox_memory: "32768"
+  # Assign a name for the development VM as shown in vbox
+  vbox_name: "stx-dev-vm"
 
-# 4 cpus
-vbox_cpus: "4"
+  # Assign a hostname for the development VM
+  hostname: "stx-dev-vm"
+
+  # Assign a port for port forwarding to ssh (22)
+  # meaning if you ssh to your <machine>:sshport it will connect to <vm>:22
+  sshport: "2222"
+
+  # Display the VirtualBox GUI when booting the machine
+  vbox_gui: true
+
+  # 20 GB memory
+  vbox_memory: "20480"
+
+  # 6 cpus
+  vbox_cpus: "6"
+
+  # 500 GB disk size
+  vbox_disk_size: "500GB"
+
+  # Uncomment and update the next line to override the location where VMs and disk are created
+  # vbox_vm_location: "D:\\SSD-VMS"
+
+  # Note: Changing the shell will likely break many other setup steps.
+  dev_shell: "/bin/bash"
+
+  # =============== BUILD settings ===============================================
+  #  Warning: DO NOT use extended characters, underscore, or spaces for PROJECT 
+  PROJECT: "stx-env"
+
+  # KNOWN_HOSTS is the list of hosts that may need host key ssh validation for git
+  KNOWN_HOSTS: "github.com"
+  ALT_HOSTS: ""
+  ALT_PORT: ""
+
+  # Internal git repositories and manifests may require additional fields to be setup
+  SSH_URL: ""
+  GIT_USER: ""
+  GIT_PASSWORD: ""
+
+  # =============== SOURCE CODE settings ===============================================
+  # StarlingX code is checked out using 'repo' command
+  # ex: repo init -u https://opendev.org/starlingx/manifest -m default.xml -b master
+  MANIFEST_URL: "https://opendev.org/starlingx/manifest"
+  MANIFEST_FILE: "default.xml"
+  MANIFEST_BRANCH: "master"
